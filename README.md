@@ -9,7 +9,9 @@ Aplicação de demonstração para o seminário de **Kubernetes** da disciplina 
 ## Arquivos do Projeto
 
 - `meu-site.yaml`: Manifesto Kubernetes contendo:
-  - **Deployment (`meu-site`)**: mantém `replicas: 3` com a imagem `nginx:1.27` (porta `80`).
+  - **RBAC (`ServiceAccount`, `Role` e `RoleBinding`)**: permite que o painel consulte e encerre Pods do próprio Deployment via API do Kubernetes.
+  - **ConfigMap (`meu-site-app`)**: código do servidor web Python e painel interativo em HTML/JS.
+  - **Deployment (`meu-site`)**: mantém `replicas: 3` com a imagem `python:3.12-alpine` (porta `80`).
   - **Service (`meu-site`)**: tipo `NodePort` (`30080`), expondo os Pods de forma estável por meio do seletor `app: meu-site`.
 - `demo-comandos.sh`: Cola com todos os comandos da apresentação prontos para copiar e colar.
 
@@ -37,7 +39,7 @@ kind create cluster --name seminario
 kubectl get nodes
 ```
 
-> **Dica:** Antes da apresentação, faça um pull prévio da imagem (`docker pull nginx:1.27` e `kind load docker-image nginx:1.27 --name seminario`) caso a internet da sala esteja lenta ou instável.
+> **Dica:** Antes da apresentação, faça um pull prévio da imagem (`docker pull python:3.12-alpine` e `kind load docker-image python:3.12-alpine --name seminario`) caso a internet da sala esteja lenta ou instável.
 
 ---
 
@@ -66,13 +68,15 @@ kubectl delete pod NOME_DO_POD
 kubectl get pods
 ```
 
-### 4. (Opcional) Acessar o Nginx via Service
+### 4. Acessar o Painel Interativo via Service
+
+Abra outro terminal e execute:
 
 ```bash
 kubectl port-forward svc/meu-site 8080:80
 ```
 
-Acesse `http://localhost:8080` no navegador.
+Acesse `http://localhost:8080` no navegador. O painel mostra em tempo real todos os Pods ativos, qual Pod atendeu à requisição e permite clicar em **Encerrar Pod** para disparar a autocorreção direto pela interface web.
 
 ---
 
@@ -81,7 +85,7 @@ Acesse `http://localhost:8080` no navegador.
 Para demonstrar atualização gradual sem derrubar a aplicação:
 
 ```bash
-kubectl set image deployment/meu-site nginx=nginx:1.27-alpine
+kubectl set env deployment/meu-site APP_VERSION=v2
 kubectl rollout status deployment/meu-site
 kubectl rollout undo deployment/meu-site
 ```

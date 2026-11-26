@@ -17,10 +17,9 @@ kubectl apply -f meu-site.yaml
 kubectl get pods
 kubectl get svc meu-site
 
-# (Opcional) Acessar o Nginx no navegador ou via curl:
-#   - Usando port-forward (funciona em qualquer cluster):
-#     kubectl port-forward svc/meu-site 8080:80
-#   - Depois acesse http://localhost:8080
+# Acessar o painel web no navegador (abra em outro terminal e deixe rodando):
+#   kubectl port-forward svc/meu-site 8080:80
+#   Depois acesse http://localhost:8080 (você verá os Pods e o botão "Encerrar Pod")
 
 # ------------------------------------------------------------------------------
 # 2. Escalar para 5 réplicas
@@ -41,8 +40,8 @@ kubectl get pods
 # ------------------------------------------------------------------------------
 # Extras (se sobrar tempo - Perguntas: Rolling Update e Rollback)
 # ------------------------------------------------------------------------------
-# Atualizar a imagem sem derrubar o sistema:
-kubectl set image deployment/meu-site nginx=nginx:1.27-alpine
+# Atualizar a versão sem derrubar o sistema (acompanhe no painel web e no terminal):
+kubectl set env deployment/meu-site APP_VERSION=v2
 kubectl rollout status deployment/meu-site
 
 # Voltar para a versão anterior (rollback):

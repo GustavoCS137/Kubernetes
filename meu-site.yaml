@@ -1,3 +1,424 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: meu-site
+  labels:
+    app: meu-site
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: meu-site-pods
+  labels:
+    app: meu-site
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: meu-site-pods
+  labels:
+    app: meu-site
+subjects:
+  - kind: ServiceAccount
+    name: meu-site
+roleRef:
+  kind: Role
+  name: meu-site-pods
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: meu-site-app
+  labels:
+    app: meu-site
+data:
+  server.py: |
+    import json
+    import os
+    import re
+    import socket
+    import ssl
+    import urllib.error
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+    K8S_API = "https://kubernetes.default.svc"
+    POD_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+    HTML_PAGE = """<!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Kubernetes Demo - Painel de Pods</title>
+      <style>
+        :root {
+          --bg: #0f172a;
+          --card: #1e293b;
+          --border: #334155;
+          --text: #f8fafc;
+          --muted: #94a3b8;
+          --blue: #3b82f6;
+          --green: #22c55e;
+          --yellow: #eab308;
+          --red: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          font-family: system-ui, -apple-system, sans-serif;
+          background: var(--bg);
+          color: var(--text);
+          padding: 2rem 1rem;
+          line-height: 1.5;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        header {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          align-items: center;
+          gap: 1rem;
+          margin-bottom: 1.5rem;
+          padding-bottom: 1rem;
+          border-bottom: 1px solid var(--border);
+        }
+        h1 { font-size: 1.5rem; }
+        .subtitle { color: var(--muted); font-size: 0.9rem; }
+        .stats {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 1rem;
+          margin-bottom: 1.5rem;
+        }
+        .card {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 1rem 1.25rem;
+        }
+        .stat-label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .stat-value { font-size: 1.4rem; font-weight: 700; margin-top: 0.25rem; word-break: break-all; }
+        .section-title {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 0.75rem;
+        }
+        .pods-list { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+        .pod-row {
+          background: var(--card);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 1rem 1.25rem;
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          align-items: center;
+          gap: 1rem;
+        }
+        .pod-info { display: flex; flex-direction: column; gap: 0.2rem; }
+        .pod-name { font-weight: 600; font-family: monospace; font-size: 1rem; }
+        .pod-meta { color: var(--muted); font-size: 0.85rem; }
+        .pod-actions { display: flex; align-items: center; gap: 0.75rem; }
+        .badge {
+          display: inline-block;
+          padding: 0.2rem 0.6rem;
+          border-radius: 999px;
+          font-size: 0.75rem;
+          font-weight: 600;
+        }
+        .badge-running { background: rgba(34, 197, 94, 0.15); color: var(--green); }
+        .badge-pending { background: rgba(234, 179, 8, 0.15); color: var(--yellow); }
+        .badge-terminating { background: rgba(239, 68, 68, 0.15); color: var(--red); }
+        .badge-self { background: rgba(59, 130, 246, 0.2); color: var(--blue); margin-left: 0.5rem; }
+        button {
+          background: var(--red);
+          color: white;
+          border: none;
+          border-radius: 6px;
+          padding: 0.5rem 0.9rem;
+          font-weight: 600;
+          cursor: pointer;
+          font-size: 0.85rem;
+        }
+        button:hover:not(:disabled) { opacity: 0.9; }
+        button:disabled { opacity: 0.45; cursor: not-allowed; }
+        .log-box {
+          background: #020617;
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 1rem;
+          font-family: monospace;
+          font-size: 0.85rem;
+          color: var(--muted);
+          max-height: 180px;
+          overflow-y: auto;
+        }
+        .log-entry { margin-bottom: 0.35rem; }
+        .log-entry strong { color: var(--text); }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <header>
+          <div>
+            <h1>Kubernetes Demo — Autocorreção de Pods</h1>
+            <p class="subtitle">Seminário de Sistemas Distribuídos (CC5SDT) • Atualização automática a cada 2s</p>
+          </div>
+          <span class="badge badge-self" id="app-version">Versão: ...</span>
+        </header>
+
+        <section class="stats">
+          <div class="card">
+            <div class="stat-label">Pod que respondeu</div>
+            <div class="stat-value" id="responder-name" style="font-size: 1rem; font-family: monospace;">...</div>
+          </div>
+          <div class="card">
+            <div class="stat-label">Total de Pods</div>
+            <div class="stat-value" id="total-pods">-</div>
+          </div>
+          <div class="card">
+            <div class="stat-label">Pods Running</div>
+            <div class="stat-value" id="running-pods" style="color: var(--green);">-</div>
+          </div>
+        </section>
+
+        <div class="section-title">
+          <h2>Pods no Cluster</h2>
+          <span class="subtitle" id="last-update">Carregando...</span>
+        </div>
+
+        <section class="pods-list" id="pods-list"></section>
+
+        <div class="section-title">
+          <h2>Histórico de Eventos</h2>
+        </div>
+        <div class="log-box" id="log-box">
+          <div class="log-entry">Aguardando ações... Clique em <strong>Encerrar Pod</strong> para testar a autocorreção.</div>
+        </div>
+      </div>
+
+      <script>
+        const podsListEl = document.getElementById("pods-list");
+        const logBoxEl = document.getElementById("log-box");
+        let knownPods = new Set();
+        let firstLoad = true;
+
+        function addLog(message) {
+          const time = new Date().toLocaleTimeString("pt-BR");
+          const entry = document.createElement("div");
+          entry.className = "log-entry";
+          entry.innerHTML = `[${time}] ${message}`;
+          logBoxEl.prepend(entry);
+        }
+
+        function badgeClass(phase) {
+          if (phase === "Running") return "badge-running";
+          if (phase === "Terminating") return "badge-terminating";
+          return "badge-pending";
+        }
+
+        async function killPod(podName, btn) {
+          btn.disabled = true;
+          btn.textContent = "Encerrando...";
+          addLog(`Solicitado encerramento do Pod <strong>${podName}</strong>...`);
+          try {
+            const res = await fetch(`/api/pods/${encodeURIComponent(podName)}`, { method: "DELETE" });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              addLog(`Erro ao encerrar <strong>${podName}</strong>: ${err.error || res.status}`);
+            } else {
+              addLog(`Pod <strong>${podName}</strong> encerrado! Aguardando Kubernetes recriar...`);
+            }
+          } catch (err) {
+            addLog(`Falha de comunicação ao encerrar <strong>${podName}</strong> (o Pod atual pode ter caído; reconecte o port-forward se necessário).`);
+          }
+          setTimeout(fetchPods, 500);
+        }
+
+        async function fetchPods() {
+          try {
+            const res = await fetch("/api/pods", { cache: "no-store" });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+
+            document.getElementById("responder-name").textContent = data.responder;
+            document.getElementById("app-version").textContent = `Versão: ${data.version}`;
+            document.getElementById("total-pods").textContent = data.pods.length;
+            const runningCount = data.pods.filter(p => p.phase === "Running").length;
+            document.getElementById("running-pods").textContent = runningCount;
+            document.getElementById("last-update").textContent = `Atualizado às ${new Date().toLocaleTimeString("pt-BR")}`;
+
+            const currentNames = new Set(data.pods.map(p => p.name));
+            if (!firstLoad) {
+              for (const name of currentNames) {
+                if (!knownPods.has(name)) {
+                  addLog(`Novo Pod criado pelo Kubernetes: <strong>${name}</strong>`);
+                }
+              }
+            }
+            knownPods = currentNames;
+            firstLoad = false;
+
+            podsListEl.innerHTML = "";
+            for (const pod of data.pods) {
+              const row = document.createElement("div");
+              row.className = "pod-row";
+
+              const isSelf = pod.name === data.responder;
+              const isTerminating = pod.phase === "Terminating";
+
+              row.innerHTML = `
+                <div class="pod-info">
+                  <div class="pod-name">
+                    ${pod.name}
+                    ${isSelf ? '<span class="badge badge-self">Atendendo agora</span>' : ""}
+                  </div>
+                  <div class="pod-meta">IP: ${pod.ip || "-"} • Versão: ${pod.version || "-"} • Reinícios: ${pod.restarts}</div>
+                </div>
+                <div class="pod-actions">
+                  <span class="badge ${badgeClass(pod.phase)}">${pod.phase}</span>
+                  <button ${isTerminating ? "disabled" : ""}>${isTerminating ? "Encerrando..." : "Encerrar Pod"}</button>
+                </div>
+              `;
+
+              const btn = row.querySelector("button");
+              btn.addEventListener("click", () => killPod(pod.name, btn));
+              podsListEl.appendChild(row);
+            }
+          } catch (err) {
+            document.getElementById("last-update").textContent = "Reconectando...";
+          }
+        }
+
+        fetchPods();
+        setInterval(fetchPods, 2000);
+      </script>
+    </body>
+    </html>
+    """
+
+
+    def read_sa_file(filename, default=""):
+      path = os.path.join(SA_DIR, filename)
+      try:
+        with open(path, "r", encoding="utf-8") as f:
+          return f.read().strip()
+      except OSError:
+        return default
+
+
+    def k8s_request(method, path):
+      token = read_sa_file("token")
+      ca_path = os.path.join(SA_DIR, "ca.crt")
+      ctx = ssl.create_default_context(cafile=ca_path) if os.path.exists(ca_path) else None
+      req = urllib.request.Request(
+          f"{K8S_API}{path}",
+          method=method,
+          headers={
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/json",
+          },
+      )
+      with urllib.request.urlopen(req, context=ctx, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+    def list_pods():
+      ns = read_sa_file("namespace", "default")
+      raw = k8s_request("GET", f"/api/v1/namespaces/{ns}/pods?labelSelector=app%3Dmeu-site")
+      pods = []
+      for item in raw.get("items", []):
+        meta = item.get("metadata", {})
+        status = item.get("status", {})
+        phase = "Terminating" if meta.get("deletionTimestamp") else status.get("phase", "Unknown")
+        restarts = sum(cs.get("restartCount", 0) for cs in status.get("containerStatuses", []))
+        containers = item.get("spec", {}).get("containers", [])
+        version = "-"
+        if containers:
+          for env in containers[0].get("env", []):
+            if env.get("name") == "APP_VERSION":
+              version = env.get("value", "-")
+              break
+        pods.append({
+            "name": meta.get("name", ""),
+            "ip": status.get("podIP", ""),
+            "phase": phase,
+            "restarts": restarts,
+            "version": version,
+        })
+      pods.sort(key=lambda p: p["name"])
+      return pods
+
+
+    class Handler(BaseHTTPRequestHandler):
+      def send_json(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+      def do_GET(self):
+        try:
+          if self.path == "/" or self.path.startswith("/?"):
+            body = HTML_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+          elif self.path == "/healthz":
+            self.send_json(200, {"status": "ok"})
+          elif self.path == "/api/pods":
+            self.send_json(200, {
+                "responder": socket.gethostname(),
+                "version": os.environ.get("APP_VERSION", "v1"),
+                "pods": list_pods(),
+            })
+          else:
+            self.send_json(404, {"error": "Not found"})
+        except (BrokenPipeError, ConnectionResetError):
+          pass
+        except urllib.error.HTTPError as e:
+          self.send_json(e.code, {"error": e.reason})
+        except Exception as e:
+          self.send_json(500, {"error": str(e)})
+
+      def do_DELETE(self):
+        try:
+          if not self.path.startswith("/api/pods/"):
+            self.send_json(404, {"error": "Not found"})
+            return
+          pod_name = self.path[len("/api/pods/"):].split("?")[0]
+          if not POD_NAME_RE.match(pod_name):
+            self.send_json(400, {"error": "Nome de Pod inválido"})
+            return
+          ns = read_sa_file("namespace", "default")
+          k8s_request("DELETE", f"/api/v1/namespaces/{ns}/pods/{pod_name}")
+          self.send_json(200, {"deleted": pod_name})
+        except (BrokenPipeError, ConnectionResetError):
+          pass
+        except urllib.error.HTTPError as e:
+          self.send_json(e.code, {"error": e.reason})
+        except Exception as e:
+          self.send_json(500, {"error": str(e)})
+
+      def log_message(self, format, *args):
+        return
+
+
+    if __name__ == "__main__":
+      server = ThreadingHTTPServer(("0.0.0.0", 80), Handler)
+      server.serve_forever()
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,11 +435,29 @@ spec:
       labels:
         app: meu-site
     spec:
+      serviceAccountName: meu-site
       containers:
-        - name: nginx
-          image: nginx:1.27
+        - name: web
+          image: python:3.12-alpine
+          command: ["python3", "/app/server.py"]
+          env:
+            - name: APP_VERSION
+              value: "v1"
           ports:
             - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+      volumes:
+        - name: app-code
+          configMap:
+            name: meu-site-app
 ---
 apiVersion: v1
 kind: Service
